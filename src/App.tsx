@@ -39,7 +39,6 @@ import { formatCurrency } from './lib/utils';
 import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import { AuthPage } from './pages/AuthPage';
 import { OnboardingPage } from './pages/OnboardingPage';
-import { LiveAssistantFloating } from './components/LiveAssistantFloating';
 import { AIIcon } from './components/AIIcon';
 
 // Protected Route Component
@@ -949,16 +948,6 @@ export default function App() {
             showToast(`Job for ${newJob.customerName} added to dispatch schedule.`);
           }}
           services={services}
-        />
-
-        <LiveAssistantFloating
-          threads={threads}
-          selectedThreadId={selectedThreadId}
-          setSelectedThreadId={setSelectedThreadId}
-          onOpenSmsInbox={() => setActiveTab('sms')}
-          onSendMessage={async (threadId, text) => {
-            await handleSendTestSms(text);
-          }}
         />
 
       </div>
