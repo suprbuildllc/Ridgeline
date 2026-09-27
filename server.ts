@@ -67,6 +67,82 @@ Your job:
    - Offer the new slot and confirm update.
 5. Tone: Short, helpful text messages (1 to 3 sentences max, suitable for SMS). Keep sentences crisp. Never write long multi-paragraph essays.`;
 
+// Default OpenAI-compatible endpoint settings (e.g. 9router, LiteLLM, vLLM, Ollama)
+const DEFAULT_OPENAI_BASE_URL = process.env.OPENAI_COMPATIBLE_BASE_URL || 'https://9router-production-a99a.up.railway.app/v1';
+const DEFAULT_OPENAI_API_KEY = process.env.OPENAI_COMPATIBLE_API_KEY || 'sk-0d71fb7c21ea2f91-mv2hhc-443a0a26';
+const DEFAULT_OPENAI_MODEL = process.env.OPENAI_COMPATIBLE_MODEL || 'gemini/gemini-3.8-flash';
+
+// Helper to call OpenAI-compatible chat completions endpoint with json output
+async function callOpenAiCompatibleChat(options: {
+  baseUrl?: string;
+  apiKey?: string;
+  model?: string;
+  systemPrompt: string;
+  userPrompt: string;
+  jsonMode?: boolean;
+}): Promise<string> {
+  const baseUrl = (options.baseUrl || DEFAULT_OPENAI_BASE_URL).replace(/\/+$/, '');
+  const apiKey = options.apiKey || DEFAULT_OPENAI_API_KEY;
+  const model = options.model || DEFAULT_OPENAI_MODEL;
+
+  const url = `${baseUrl}/chat/completions`;
+  const body: any = {
+    model,
+    messages: [
+      { role: 'system', content: options.systemPrompt },
+      { role: 'user', content: options.userPrompt },
+    ],
+    temperature: 0.2,
+  };
+
+  if (options.jsonMode) {
+    body.response_format = { type: 'json_object' };
+  }
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`OpenAI-compatible API error (${response.status}): ${errText}`);
+  }
+
+  const text = await response.text();
+
+  // Handle both standard JSON responses and SSE streams if returned
+  try {
+    const json = JSON.parse(text);
+    return json.choices?.[0]?.message?.content || '';
+  } catch (e) {
+    // Check if response is Server-Sent Events (data: {...})
+    if (text.includes('data:')) {
+      let accumulatedContent = '';
+      const lines = text.split('\n');
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('data:') && !trimmed.includes('[DONE]')) {
+          const chunkStr = trimmed.slice(5).trim();
+          try {
+            const chunk = JSON.parse(chunkStr);
+            const delta = chunk.choices?.[0]?.delta?.content || chunk.choices?.[0]?.message?.content || '';
+            accumulatedContent += delta;
+          } catch (err) {
+            // continue
+          }
+        }
+      }
+      if (accumulatedContent) return accumulatedContent;
+    }
+    return text;
+  }
+}
+
 // ==========================================
 // AUTHENTICATION & SECURITY (NEON POSTGRES)
 // ==========================================
@@ -614,6 +690,10 @@ app.get('/api/neon/data', async (req: Request, res: Response) => {
           workWeekends: s.work_weekends,
         },
         emergencyKeywords: s.emergency_keywords || [],
+        llmProvider: s.llm_provider || 'openai_compatible',
+        openaiBaseUrl: s.openai_base_url || DEFAULT_OPENAI_BASE_URL,
+        openaiApiKey: s.openai_api_key || DEFAULT_OPENAI_API_KEY,
+        openaiModel: s.openai_model || DEFAULT_OPENAI_MODEL,
       };
     }
 
@@ -1004,7 +1084,7 @@ app.post('/api/sms/message', async (req: Request, res: Response) => {
   });
 });
 
-// API: Process incoming SMS with Gemini + Auto-Sync to Neon
+// API: Process incoming SMS with OpenAI-Compatible Endpoint or Gemini + Auto-Sync to Neon
 app.post('/api/sms/process', async (req: Request, res: Response) => {
   try {
     const {
@@ -1024,8 +1104,7 @@ app.post('/api/sms/process', async (req: Request, res: Response) => {
 
     let parsedResult: any = null;
 
-    if (ai) {
-      const prompt = `
+    const prompt = `
 Context:
 - Business: ${settings.businessName || 'Apex Trades'}
 - Tradesperson: ${settings.tradespersonName || 'Mark'} (${settings.tradeType || 'plumbing'})
@@ -1043,66 +1122,109 @@ New incoming SMS from customer:
 "${incomingText}"
 
 Analyze this message, determine the intent, formulate the optimal SMS response, and extract structured data.
-Return a valid JSON object matching the requested schema.`;
+You MUST return a JSON object with the following schema:
+{
+  "replyText": "exact SMS text string under 300 characters, friendly and direct",
+  "intent": "book" | "reschedule" | "cancel" | "inquiry" | "emergency" | "confirm",
+  "urgency": "routine" | "urgent" | "emergency",
+  "actionTag": "auto_booked" | "rescheduled" | "quote_given" | "emergency_escalated" | "slot_offered" | "info_requested",
+  "serviceTitle": "matched service title or null",
+  "suggestedSlot": "proposed slot or confirmed slot e.g. Tomorrow 09:00 AM - 11:00 AM or null",
+  "extractedAddress": "address extracted from message if any or null",
+  "estimatedPrice": number,
+  "shouldConfirmBooking": boolean (true if slot explicitly confirmed/booked/rescheduled)
+}`;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: prompt,
-        config: {
-          systemInstruction: RIDGELINE_SYSTEM_PROMPT,
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              replyText: {
-                type: Type.STRING,
-                description: 'The exact SMS text message to send back to the customer (keep under 300 characters, friendly and direct).',
+    // Determine LLM provider: OpenAI-compatible endpoint vs Native Gemini vs Rule-based
+    const preferredProvider = settings.llmProvider || (settings.openaiApiKey || DEFAULT_OPENAI_API_KEY ? 'openai_compatible' : 'gemini');
+
+    if (preferredProvider === 'openai_compatible') {
+      try {
+        const rawContent = await callOpenAiCompatibleChat({
+          baseUrl: settings.openaiBaseUrl || DEFAULT_OPENAI_BASE_URL,
+          apiKey: settings.openaiApiKey || DEFAULT_OPENAI_API_KEY,
+          model: settings.openaiModel || DEFAULT_OPENAI_MODEL,
+          systemPrompt: RIDGELINE_SYSTEM_PROMPT,
+          userPrompt: prompt,
+          jsonMode: true,
+        });
+
+        // Strip markdown fences if present e.g. ```json ... ```
+        const cleaned = rawContent.replace(/```(?:json)?/gi, '').replace(/```/g, '').trim();
+        parsedResult = JSON.parse(cleaned);
+        parsedResult.source = 'openai_compatible';
+        parsedResult.model = settings.openaiModel || DEFAULT_OPENAI_MODEL;
+      } catch (openAiErr: any) {
+        console.warn('OpenAI-compatible call failed, falling back:', openAiErr.message);
+      }
+    }
+
+    // Secondary fallback: Gemini SDK if available
+    if (!parsedResult && ai) {
+      try {
+        const response = await ai.models.generateContent({
+          model: 'gemini-3.8-flash',
+          contents: prompt,
+          config: {
+            systemInstruction: RIDGELINE_SYSTEM_PROMPT,
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                replyText: {
+                  type: Type.STRING,
+                  description: 'The exact SMS text message to send back to the customer (keep under 300 characters, friendly and direct).',
+                },
+                intent: {
+                  type: Type.STRING,
+                  enum: ['book', 'reschedule', 'cancel', 'inquiry', 'emergency', 'confirm'],
+                  description: 'Primary customer intent',
+                },
+                urgency: {
+                  type: Type.STRING,
+                  enum: ['routine', 'urgent', 'emergency'],
+                  description: 'Urgency tier of the job',
+                },
+                actionTag: {
+                  type: Type.STRING,
+                  enum: ['auto_booked', 'rescheduled', 'quote_given', 'emergency_escalated', 'slot_offered', 'info_requested'],
+                  description: 'Action taken by the assistant',
+                },
+                serviceTitle: {
+                  type: Type.STRING,
+                  description: 'Matched trade service title, if determined.',
+                },
+                suggestedSlot: {
+                  type: Type.STRING,
+                  description: 'Proposed or confirmed time slot e.g. "Tomorrow 09:00 AM - 11:00 AM"',
+                },
+                extractedAddress: {
+                  type: Type.STRING,
+                  description: 'Address extracted from text if provided.',
+                },
+                estimatedPrice: {
+                  type: Type.NUMBER,
+                  description: 'Estimated dollar cost based on service catalog, or 0 if unknown.',
+                },
+                shouldConfirmBooking: {
+                  type: Type.BOOLEAN,
+                  description: 'True if a new booking or slot was explicitly agreed upon and should be added/updated in the schedule.',
+                },
               },
-              intent: {
-                type: Type.STRING,
-                enum: ['book', 'reschedule', 'cancel', 'inquiry', 'emergency', 'confirm'],
-                description: 'Primary customer intent',
-              },
-              urgency: {
-                type: Type.STRING,
-                enum: ['routine', 'urgent', 'emergency'],
-                description: 'Urgency tier of the job',
-              },
-              actionTag: {
-                type: Type.STRING,
-                enum: ['auto_booked', 'rescheduled', 'quote_given', 'emergency_escalated', 'slot_offered', 'info_requested'],
-                description: 'Action taken by the assistant',
-              },
-              serviceTitle: {
-                type: Type.STRING,
-                description: 'Matched trade service title, if determined.',
-              },
-              suggestedSlot: {
-                type: Type.STRING,
-                description: 'Proposed or confirmed time slot e.g. "Tomorrow 09:00 AM - 11:00 AM"',
-              },
-              extractedAddress: {
-                type: Type.STRING,
-                description: 'Address extracted from text if provided.',
-              },
-              estimatedPrice: {
-                type: Type.NUMBER,
-                description: 'Estimated dollar cost based on service catalog, or 0 if unknown.',
-              },
-              shouldConfirmBooking: {
-                type: Type.BOOLEAN,
-                description: 'True if a new booking or slot was explicitly agreed upon and should be added/updated in the schedule.',
-              },
+              required: ['replyText', 'intent', 'urgency', 'actionTag', 'shouldConfirmBooking'],
             },
-            required: ['replyText', 'intent', 'urgency', 'actionTag', 'shouldConfirmBooking'],
           },
-        },
-      });
+        });
 
-      parsedResult = JSON.parse(response.text?.trim() || '{}');
-      parsedResult.source = 'gemini';
-    } else {
-      // Rule-based fallback if no Gemini key
+        parsedResult = JSON.parse(response.text?.trim() || '{}');
+        parsedResult.source = 'gemini';
+      } catch (geminiErr: any) {
+        console.warn('Gemini call failed, falling back to rule-based engine:', geminiErr.message);
+      }
+    }
+
+    if (!parsedResult) {
+      // Rule-based fallback if neither LLM succeeded
       const lower = incomingText.toLowerCase();
       let intent: 'book' | 'reschedule' | 'cancel' | 'inquiry' | 'emergency' | 'confirm' = 'inquiry';
       let urgency: 'routine' | 'urgent' | 'emergency' = 'routine';
@@ -1170,16 +1292,47 @@ app.post('/api/missed-call/process', async (req: Request, res: Response) => {
 
     let autoSms = `Hey ${callerName || 'there'}! Mark with ${settings.businessName || 'Apex Plumbing'} here. I'm currently on a service call and couldn't grab the phone. Need help with a plumbing or mechanical issue? Reply here and I'll get you on the schedule!`;
 
-    if (ai && voicemailTranscript) {
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: `A customer left this voicemail after a missed call: "${voicemailTranscript}".
+    if (voicemailTranscript) {
+      const preferredProvider = settings.llmProvider || (settings.openaiApiKey || DEFAULT_OPENAI_API_KEY ? 'openai_compatible' : 'gemini');
+      const prompt = `A customer left this voicemail after a missed call: "${voicemailTranscript}".
 Tradesperson: ${settings.tradespersonName || 'Mark'} with ${settings.businessName || 'Apex Plumbing'}.
 Draft the immediate follow-up SMS text to send them within 10 seconds to secure the booking before they call a competitor.
-Keep it under 240 chars, friendly, acknowledging what they mentioned in the voicemail.`,
-      });
+Keep it under 240 chars, friendly, acknowledging what they mentioned in the voicemail. Reply with ONLY the SMS text message content.`;
 
-      autoSms = response.text?.trim() || autoSms;
+      let generated = false;
+
+      if (preferredProvider === 'openai_compatible') {
+        try {
+          const resText = await callOpenAiCompatibleChat({
+            baseUrl: settings.openaiBaseUrl || DEFAULT_OPENAI_BASE_URL,
+            apiKey: settings.openaiApiKey || DEFAULT_OPENAI_API_KEY,
+            model: settings.openaiModel || DEFAULT_OPENAI_MODEL,
+            systemPrompt: RIDGELINE_SYSTEM_PROMPT,
+            userPrompt: prompt,
+            jsonMode: false,
+          });
+          if (resText?.trim()) {
+            autoSms = resText.trim().replace(/^["']|["']$/g, '');
+            generated = true;
+          }
+        } catch (e: any) {
+          console.warn('OpenAI compatible missed call text failed:', e.message);
+        }
+      }
+
+      if (!generated && ai) {
+        try {
+          const response = await ai.models.generateContent({
+            model: 'gemini-3.8-flash',
+            contents: prompt,
+          });
+          if (response.text?.trim()) {
+            autoSms = response.text.trim();
+          }
+        } catch (err: any) {
+          console.warn('Gemini missed call text failed:', err.message);
+        }
+      }
     }
 
     // Persist missed call to Neon if pool available
@@ -1207,12 +1360,45 @@ Keep it under 240 chars, friendly, acknowledging what they mentioned in the voic
   }
 });
 
+// API: Test OpenAI-compatible endpoint connectivity
+app.post('/api/ai/test-endpoint', async (req: Request, res: Response) => {
+  const { baseUrl, apiKey, model } = req.body;
+  try {
+    const start = Date.now();
+    const result = await callOpenAiCompatibleChat({
+      baseUrl,
+      apiKey,
+      model,
+      systemPrompt: 'You are an automated API health validator. Reply with valid JSON.',
+      userPrompt: 'Confirm connectivity. Reply strictly in JSON: {"status": "ok", "message": "Connection established successfully"}',
+      jsonMode: true,
+    });
+    const latency = Date.now() - start;
+    const parsed = JSON.parse(result.replace(/```(?:json)?/gi, '').replace(/```/g, '').trim());
+    return res.json({
+      success: true,
+      latencyMs: latency,
+      endpoint: baseUrl || DEFAULT_OPENAI_BASE_URL,
+      model: model || DEFAULT_OPENAI_MODEL,
+      response: parsed,
+    });
+  } catch (err: any) {
+    return res.status(400).json({
+      success: false,
+      error: err.message || 'Failed to connect to OpenAI-compatible endpoint',
+    });
+  }
+});
+
 // Health check
 app.get('/api/health', (req: Request, res: Response) => {
   res.json({
     status: 'healthy',
     timestamp: new Date().toISOString(),
     geminiConfigured: !!apiKey,
+    openaiCompatibleConfigured: !!DEFAULT_OPENAI_API_KEY,
+    openaiEndpoint: DEFAULT_OPENAI_BASE_URL,
+    openaiDefaultModel: DEFAULT_OPENAI_MODEL,
     neonConfigured: !!pool,
     platform: 'RidgeLine AI Dispatch',
   });

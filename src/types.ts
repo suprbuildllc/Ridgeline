@@ -94,6 +94,11 @@ export interface AssistantSettings {
     workWeekends: boolean;
   };
   emergencyKeywords: string[];
+  // LLM / AI Engine Settings (OpenAI-compatible vs Gemini)
+  llmProvider?: 'openai_compatible' | 'gemini';
+  openaiBaseUrl?: string;
+  openaiApiKey?: string;
+  openaiModel?: string;
 }
 
 export interface Organization {

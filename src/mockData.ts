@@ -51,6 +51,10 @@ export const initialSettings: AssistantSettings = {
     workWeekends: false,
   },
   emergencyKeywords: ['flood', 'burst pipe', 'sewage', 'sparking', 'no heat', 'carbon monoxide', 'water main'],
+  llmProvider: 'openai_compatible',
+  openaiBaseUrl: 'https://9router-production-a99a.up.railway.app/v1',
+  openaiApiKey: 'sk-0d71fb7c21ea2f91-mv2hhc-443a0a26',
+  openaiModel: 'gemini/gemini-3.8-flash',
 };
 
 export const initialServices: TradeService[] = [

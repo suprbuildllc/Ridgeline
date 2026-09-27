@@ -82,6 +82,10 @@ export const OrganizationSettings: React.FC<OrganizationSettingsProps> = ({
   const [isTestingWebhook, setIsTestingWebhook] = useState(false);
   const [testResult, setTestResult] = useState<string | null>(null);
 
+  // OpenAI-compatible endpoint test state
+  const [isTestingLlm, setIsTestingLlm] = useState(false);
+  const [llmTestStatus, setLlmTestStatus] = useState<{ success: boolean; message: string; latency?: number } | null>(null);
+
   const webhookUrl = `${window.location.origin}/api/sms/process`;
   const voiceWebhookUrl = `${window.location.origin}/api/missed-call/process`;
 
@@ -157,6 +161,45 @@ export const OrganizationSettings: React.FC<OrganizationSettingsProps> = ({
       setTestResult('Ping succeeded (Local simulator mode active)');
     } finally {
       setIsTestingWebhook(false);
+    }
+  };
+
+  const handleTestOpenAiEndpoint = async () => {
+    setIsTestingLlm(true);
+    setLlmTestStatus(null);
+    try {
+      const res = await fetch('/api/ai/test-endpoint', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          baseUrl: aiForm.openaiBaseUrl || 'https://9router-production-a99a.up.railway.app/v1',
+          apiKey: aiForm.openaiApiKey || 'sk-0d71fb7c21ea2f91-mv2hhc-443a0a26',
+          model: aiForm.openaiModel || 'gemini/gemini-3.8-flash',
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setLlmTestStatus({
+          success: true,
+          message: `Connected successfully to ${data.model} at endpoint!`,
+          latency: data.latencyMs,
+        });
+        showToast(`OpenAI-compatible connection verified (${data.latencyMs}ms)!`);
+      } else {
+        setLlmTestStatus({
+          success: false,
+          message: data.error || 'Connection failed to OpenAI-compatible endpoint.',
+        });
+        showToast(`Connection failed: ${data.error || 'Error'}`);
+      }
+    } catch (err: any) {
+      setLlmTestStatus({
+        success: false,
+        message: err.message || 'Network error while contacting API.',
+      });
+      showToast(`Network error: ${err.message}`);
+    } finally {
+      setIsTestingLlm(false);
     }
   };
 
@@ -786,6 +829,158 @@ export const OrganizationSettings: React.FC<OrganizationSettingsProps> = ({
               <p className="text-[11px] text-neutral-500">
                 When customers text these words, RidgeLine provides immediate safety shutoff guidance and offers priority same-day slots.
               </p>
+            </div>
+
+            {/* OPENAI-COMPATIBLE ENDPOINT CONFIGURATION */}
+            <div className="pt-4 border-t border-neutral-100 space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div>
+                  <h4 className="text-xs font-bold text-neutral-900 font-head flex items-center gap-1.5">
+                    <Zap className="h-3.5 w-3.5 text-amber-500" />
+                    OpenAI-Compatible LLM / AI Engine Settings
+                  </h4>
+                  <p className="text-[11px] text-neutral-500 mt-0.5">
+                    Configure custom AI routing via OpenAI-compatible endpoints (e.g. 9router, vLLM, LiteLLM, Ollama).
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleTestOpenAiEndpoint}
+                    disabled={isTestingLlm}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-md border border-neutral-200 bg-neutral-50 hover:bg-neutral-100 text-neutral-700 transition-colors shadow-2xs cursor-pointer disabled:opacity-50"
+                  >
+                    <Radio className={`h-3 w-3 text-emerald-600 ${isTestingLlm ? 'animate-ping' : ''}`} />
+                    <span>{isTestingLlm ? 'Validating...' : 'Test Connection'}</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Status / Test result feedback */}
+              {llmTestStatus && (
+                <div
+                  className={`p-3 rounded-lg border text-xs flex items-start gap-2.5 ${
+                    llmTestStatus.success
+                      ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                      : 'bg-red-50 border-red-200 text-red-800'
+                  }`}
+                >
+                  {llmTestStatus.success ? (
+                    <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0 mt-0.5" />
+                  ) : (
+                    <AlertTriangle className="h-4 w-4 text-red-600 shrink-0 mt-0.5" />
+                  )}
+                  <div>
+                    <div className="font-semibold">{llmTestStatus.message}</div>
+                    {llmTestStatus.latency && (
+                      <div className="text-[11px] font-mono opacity-80 mt-0.5">
+                        Latency: {llmTestStatus.latency}ms · API healthy
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Provider Selection */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                <label
+                  onClick={() => setAiForm({ ...aiForm, llmProvider: 'openai_compatible' })}
+                  className={`p-3 rounded-lg border cursor-pointer flex flex-col gap-1 transition-colors ${
+                    (aiForm.llmProvider || 'openai_compatible') === 'openai_compatible'
+                      ? 'border-neutral-900 bg-neutral-50/80 font-medium ring-1 ring-neutral-900'
+                      : 'border-neutral-200 hover:border-neutral-300'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold text-neutral-900 flex items-center gap-1.5">
+                      <span className="h-2 w-2 rounded-full bg-emerald-500 inline-block" />
+                      OpenAI-Compatible Gateway (Active)
+                    </span>
+                    <input
+                      type="radio"
+                      name="llmProvider"
+                      checked={(aiForm.llmProvider || 'openai_compatible') === 'openai_compatible'}
+                      onChange={() => {}}
+                      className="accent-neutral-900"
+                    />
+                  </div>
+                  <span className="text-[11px] text-neutral-500 font-normal">
+                    Routes through OpenAI v1 API standard with custom endpoint URL, API key, and model tag.
+                  </span>
+                </label>
+
+                <label
+                  onClick={() => setAiForm({ ...aiForm, llmProvider: 'gemini' })}
+                  className={`p-3 rounded-lg border cursor-pointer flex flex-col gap-1 transition-colors ${
+                    aiForm.llmProvider === 'gemini'
+                      ? 'border-neutral-900 bg-neutral-50/80 font-medium ring-1 ring-neutral-900'
+                      : 'border-neutral-200 hover:border-neutral-300'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold text-neutral-900 flex items-center gap-1.5">
+                      <span className="h-2 w-2 rounded-full bg-blue-500 inline-block" />
+                      Direct Gemini SDK
+                    </span>
+                    <input
+                      type="radio"
+                      name="llmProvider"
+                      checked={aiForm.llmProvider === 'gemini'}
+                      onChange={() => {}}
+                      className="accent-neutral-900"
+                    />
+                  </div>
+                  <span className="text-[11px] text-neutral-500 font-normal">
+                    Direct server-side Google GenAI TypeScript SDK integration.
+                  </span>
+                </label>
+              </div>
+
+              {/* Endpoint, Key and Model Inputs */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs bg-neutral-50 p-3.5 rounded-lg border border-neutral-200">
+                <div className="md:col-span-1">
+                  <label className="block font-medium text-neutral-700 mb-1">
+                    OpenAI-Compatible Endpoint URL
+                  </label>
+                  <input
+                    type="url"
+                    value={aiForm.openaiBaseUrl || 'https://9router-production-a99a.up.railway.app/v1'}
+                    onChange={(e) => setAiForm({ ...aiForm, openaiBaseUrl: e.target.value })}
+                    placeholder="https://.../v1"
+                    className="w-full bg-white border border-neutral-200 rounded px-2.5 py-1.5 text-neutral-800 font-mono text-[11px] focus:outline-none focus:ring-1 focus:ring-neutral-900"
+                  />
+                  <span className="text-[10px] text-neutral-400 mt-1 block">Default: 9router production endpoint</span>
+                </div>
+
+                <div className="md:col-span-1">
+                  <label className="block font-medium text-neutral-700 mb-1">
+                    API Key
+                  </label>
+                  <input
+                    type="password"
+                    value={aiForm.openaiApiKey || 'sk-0d71fb7c21ea2f91-mv2hhc-443a0a26'}
+                    onChange={(e) => setAiForm({ ...aiForm, openaiApiKey: e.target.value })}
+                    placeholder="sk-..."
+                    className="w-full bg-white border border-neutral-200 rounded px-2.5 py-1.5 text-neutral-800 font-mono text-[11px] focus:outline-none focus:ring-1 focus:ring-neutral-900"
+                  />
+                  <span className="text-[10px] text-neutral-400 mt-1 block">Bearer token passed in Authorization header</span>
+                </div>
+
+                <div className="md:col-span-1">
+                  <label className="block font-medium text-neutral-700 mb-1">
+                    Model Identifier
+                  </label>
+                  <input
+                    type="text"
+                    value={aiForm.openaiModel || 'gemini/gemini-3.8-flash'}
+                    onChange={(e) => setAiForm({ ...aiForm, openaiModel: e.target.value })}
+                    placeholder="gemini/gemini-3.8-flash"
+                    className="w-full bg-white border border-neutral-200 rounded px-2.5 py-1.5 text-neutral-800 font-mono text-[11px] focus:outline-none focus:ring-1 focus:ring-neutral-900"
+                  />
+                  <span className="text-[10px] text-neutral-400 mt-1 block">e.g. gemini/gemini-3.8-flash</span>
+                </div>
+              </div>
             </div>
 
             <div className="flex justify-end pt-3 border-t border-neutral-100">
